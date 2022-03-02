@@ -21,10 +21,10 @@
     // second {} will be replaced with max(years)
     // the script adds a timestamp and .xlsx extension
     // e.g. "../public_datasets/dnp_panel-data_{}-{}"
-    "path_output": "out/dnp_panel-data_{}-{}",
+    "path_output": "output/dnp_panel-data_{}-{}",
 
     // years to include
-    "years": [2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021],
+    "years": [2019, 2020, 2021],
 
     // exclude deprecated variables
     // true or false
