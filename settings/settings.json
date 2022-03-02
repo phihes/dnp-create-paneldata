@@ -1,0 +1,64 @@
+{
+    // path to panel structure excel file
+    // e.g. "../panel.xlsx"
+    "path_panel": "settings/panel.xlsx",
+
+    // name of sheets in panel structure excel file
+    "sheet_persons": "persons",
+    "sheet_panel_entities": "panel_entities",
+    "sheet_companies": "companies",
+    "sheet_groups": "groups",
+    "sheet_questions": "data dictionary",
+    "sheet_scales": "scales",
+    "sheet_selection": "selections",
+
+    // path to survey data - {} will be replaced with year (YYYY)
+    // e.g. "../data/result-{}.xlsx"
+    "path_results": "survey-results/results_{}.xlsx",
+
+    // path to resulting output file
+    // first {} will be replaced with min(years)
+    // second {} will be replaced with max(years)
+    // the script adds a timestamp and .xlsx extension
+    // e.g. "../public_datasets/dnp_panel-data_{}-{}"
+    "path_output": "out/dnp_panel-data_{}-{}",
+
+    // years to include
+    "years": [2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021],
+
+    // exclude deprecated variables
+    // true or false
+    "exclude_deprecated": true,
+
+    // exclude variables with personal information
+    // true or false
+    "exclude_personal": false,
+
+    // exclude variables with auxiliary information
+    // true or false
+    "exclude_auxiliary": false,
+
+    // exclude din meta data (all variables starting with "din_")
+    "exclude_din_meta_data": false,
+
+    // exclude variables from special sections
+    // true or false
+    "exclude_special_sections": false,
+
+    // exclude variables with less x years in which they were part of the questionnaire
+    // e.g. 2
+    "exclude_years_min": 1,
+
+    // allow missing observations: include panel entities which did not complete all specified years
+    // true or false
+    "allow_missing": true,
+
+    // save the results to an excel file
+    // true or false
+    "save_output": true,
+
+    // use selection history:
+    // do not run selection algorithm, but use "historic" selection mask
+    // true or false
+    "use_selection_history": true
+}
