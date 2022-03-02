@@ -26,7 +26,7 @@ The inputs for this script are:
 
 ## Output
 
-The output is an Excel file (default: `out/dnp_panel-data_<year_panel_starts>-<year_panel_ends>_<file_creation_date>.xlsx`) that includes several sheets:
+The output is an Excel file (default: `output/dnp_panel-data_<year_panel_starts>-<year_panel_ends>_<file_creation_date>.xlsx`) that includes several sheets:
 
 - **info**: creation date, number of observations
 - **variables**: variable overview (name, label, question, scale)
