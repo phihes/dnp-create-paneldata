@@ -292,7 +292,11 @@ class DataSetCreator(object):
     def _get_q_map(q, q_dict, scales):
         """
         Map observations to desired values, using the corresponding
-        question's scale definition
+        question's scale definition.
+
+        A default mapped value can be set by setting the $default$ flag,
+        all original data values that can't be mapped will be mapped
+        to the default value.
 
         :param q: question name
         :param q_dict: question dictionary (q->{...,scale: scalename})
@@ -438,7 +442,8 @@ class DataSetCreator(object):
                 'view': panel['view']
             })
             # debug
-            logger.info("Group in {}: {} positions".format(panel['year'].unique()[0], len(panel['cat_position'].unique())))
+            # logger.info("positions: ")
+            # logger.info(panel['cat_position'].value_counts())
         except Exception as e:
             logger.error("Data is missing for {}:".format(panel['year'].unique()[0]))
             logger.error(e)
@@ -452,6 +457,10 @@ class DataSetCreator(object):
             selection.append(group_selection)
 
         selected = pd.concat(selection)
+        logger.info("{}: selected {}/{} participants".format(
+            ", ".join([str(y) for y in panel['year'].unique().tolist()]),
+            len(selected[selected>0].index), len(selected)
+        ))
 
         return selected > 0, selected.replace({
             0: 'other representative selected or not enough questions answered',
@@ -481,7 +490,6 @@ class DataSetCreator(object):
         )
 
         # create "selection" column
-        logger.info("Selecting observations for panel...")
         selection, selection_reason = DataSetCreator.select(df)
         df['algorithmic_selection'] = selection
         df['algorithmic_selection_comment'] = selection_reason
