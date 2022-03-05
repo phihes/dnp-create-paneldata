@@ -271,10 +271,6 @@ class DataSetCreator(object):
         for y in self.years:
             try:
                 sel = self.selection.set_index("email_{}".format(y))
-
-                # debug
-                # print(sel)
-
                 selected = True if sel.loc[email][selection_col] == 1 else False
                 break
             except KeyError:
@@ -293,10 +289,6 @@ class DataSetCreator(object):
         """
         Map observations to desired values, using the corresponding
         question's scale definition.
-
-        A default mapped value can be set by setting the $default$ flag,
-        all original data values that can't be mapped will be mapped
-        to the default value.
 
         :param q: question name
         :param q_dict: question dictionary (q->{...,scale: scalename})
@@ -522,6 +514,10 @@ class DataSetCreator(object):
         """
         Replaces all data values for questions that have defined scales.
 
+        A default mapped value can be set by setting the $default$ flag,
+        all original data values that can't be mapped will be mapped
+        to the default value.
+
         :param data: dict{year:DataFrame} of survey data
         :param scales:
         :param q_dict:
@@ -536,9 +532,33 @@ class DataSetCreator(object):
         for y in data.keys():
             for c in data[y].columns:
                 if c in obs_map.keys():
-                    data[y][c] = data[y][c].astype(str).replace(obs_map[c])
-                    if c in q_dict.keys() and q_dict[c]['format'] == 'numeric':
-                        data[y][c] = pd.to_numeric(data[y][c], errors='coerce')
+                    observations = data[y][c]
+                    scale = q_dict[c] if c in q_dict.keys() else None
+                    scale_map = obs_map[c]
+                    default_map = {}
+
+                    # if a default value is set,
+                    # replace all original values for which no mapping exists
+                    # with that default mapping value
+                    if "$default$" in scale_map.keys():
+                        # all values in the data that do not appear in map:
+                        unmapped = set(observations.unique()) - set(scale_map.keys()) - {'', np.nan, 'nan'}
+                        default_map = {str(k): scale_map["$default$"] for k in unmapped}
+
+                    # replace values with mapped + default values
+                    data[y][c] = observations.astype(str).replace({
+                        **scale_map,
+                        **default_map,
+                        **{
+                            'nan': np.nan,
+                            '': np.nan
+                        }
+                    })
+
+                    # if scale is in defined as numeric, cast column to numeric
+                    # if c in q_dict.keys() and q_dict[c]['format'] == 'numeric':
+                    if scale is not None and scale['format'] == 'numeric':
+                        data[y][c] = pd.to_numeric(observations, errors='coerce')
 
         return data
 
