@@ -7,7 +7,8 @@ from jsmin import jsmin
 from collections import Counter
 import os.path
 from xlrd.biffh import XLRDError
-from pprint import pprint
+from aenum import IntEnum
+import time
 
 # set up logging (to console)
 import logging
@@ -113,12 +114,25 @@ class DataSetType:
     PANEL = 2
 
 
+class SelectionReason(IntEnum):
+    """
+    Reasons why a participant was / was not selected for sample;
+
+    Reason > 0 : selected, Reason <= 0 : not selected
+    """
+    NOT_ENOUGH_QUESTIONS_ANSWERED = -1
+    NOT_SELECTED_OTHER_REPRESENTATIVE_WAS_SELECTED = 0
+    SELECTED_AS_COMPANY_REPRESENTATIVE = 1
+    SELECTED_AS_COMPANY_REPRESENTATIVE_NO_OTHERS_FOUND = 2
+    SELECTED_AS_INDUSTRY_REPRESENTATIVE = 3
+
+
 class DataSetCreator(object):
 
     dataset_extra_cols = {
         'selected', 'algorithmic_selection',
         'algorithmic_selection_comment', 'historic_selection',
-        'panel_entity_id', 'person_id', 'year'
+        'panel_entity_id', 'person_id', 'year', 'cat_position', 'email'
     }
 
     required_settings = ['path_panel', 'sheet_persons', 'sheet_panel_entities',
@@ -152,6 +166,25 @@ class DataSetCreator(object):
             settings=self.settings
         )
 
+        # create lookup for persons
+        self.persons_lookup = (self.persons
+            .drop_duplicates(
+                subset=["email", "wave_added"],
+                keep="last"
+            )
+            .set_index(
+                ["email", "wave_added"]
+            )
+            [["id", "panel_entity_id"]]
+            .rename(
+                columns={
+                "id": "person_id"
+            })
+            .to_dict(
+                orient='index'
+            )
+        )
+
         logger.info("Mapping scales...")
         self.data = self._map_scales(
             data=self.data,
@@ -165,7 +198,7 @@ class DataSetCreator(object):
         # warn if persons couldn't be identified
         for y, missing in self.missing_persons.items():
             if len(missing) > 0:
-                logger.warning("Missing in {}: {}".format(y, ", ".join(missing)))
+                logger.warning("Missing in {}: {} persons".format(y, len(missing))) # ", ".join(missing)))
 
     def _validate_settings(self):
         for s in self.required_settings:
@@ -282,8 +315,6 @@ class DataSetCreator(object):
     def _select_by_history(self, df):
         return df.apply(lambda x: self._was_selected(x['email'], x['year']), axis=1)
 
-    # Map observations to desired values, using the corresponding
-    # question's scale definition
     @staticmethod
     def _get_q_map(q, q_dict, scales):
         """
@@ -320,41 +351,27 @@ class DataSetCreator(object):
         :param year: year of entry in participant DB
         :return: {panel_entity_id:int value, person_id:int value}
         """
-        panel_entity_id = None
-        person_id = None
-        try:
-            person = self.persons.query(
-                'email=="{}" and wave_added<={}'.format(email, year)
-            ).sort_values('wave_added', ascending=False).iloc[0]
 
-            panel_entity_id = person['panel_entity_id']
-            person_id = person['id']
+        res = None
 
-            # panel_entity = self.panel_entities.query(
-            #    'panel_entity_id=="{}"'.format(panel_entity_id)
-            #    ).iloc[0]
-            # panel_entity = self.panel_entities.query(
-            #    'id=={}'.format(panel_entity_id)
-            #    ).iloc[0]
+        for i in range(year, min(self.persons.wave_added)-1, -1):
+            try:
+                res = self.persons_lookup[(email, i)]
+                break
+            except KeyError:
+                pass
 
-            # company = self.companies.query(
-            #    'id=={}'.format(panel_entity['company_id'])
-            #    ).iloc[0]
-            # din_id = company['din_kundennummer']
-        except IndexError:
-            # logger.warning('Could not identify {} in {}'.format(email, year))
-            # logger.warning('Add them to sheet {} in {}'.format(
-            #    self.settings['sheet_persons'], self.settings['path_panel'])
-            # )
+        if res is None:
             self.missing_persons[year].add(email)
-
-        return {
-            'panel_entity_id': panel_entity_id,
-            'person_id': person_id
-        }
+            return {
+                'panel_entity_id': None,
+                'person_id': None
+            }
+        else:
+            return res
 
     @staticmethod
-    def _select(group):
+    def _select_company_representative(group):
         """
         Algorithm for selecting DNP participants:
 
@@ -367,98 +384,120 @@ class DataSetCreator(object):
                        threshold up to which organization subdivisions are
                        regarded as separate units.
 
-        Input:  Required information (df columns) per participant:
-
-        • fill [float]         Percentage of questions answered (“Füllgrad”)
-        • position [bool]      The participant’s stated main activity / position
-                               is standardization
-        • employees [int]      The associated company’s number of employees, as
-                               stated by participant
-        • turnover [int]       The associated company’s turnover, as stated by
-                               participant
-        • missing_sector [bool] True if participant has not stated the
-                                associated company’s sector
-        • answered [bool]       fill=100%
         :param group: A Pandas group of participants, where each participant represents
                       the same company.
         :return: Pandas Series with bool selected
         """
-        selected = []
+        # selected = []
+
         # order by fraction of answered questions (most first)
-        ranked = group.sort_values(['fill'], ascending=False)
+        # ranked = group.sort_values(['fill'], ascending=False)
+        fill = group["total_fill"]
+        max_fill = max(fill)
 
-        has_view = not pd.isnull(ranked['view'].iloc[0])
-        above_threshold = max(ranked['fill']) >= 0.1
+        # de-select all participants with too much missing data
+        # group.loc[fill < min_fill, "selected"] = SelectionReason.NOT_ENOUGH_QUESTIONS_ANSWERED
 
+        # CASE A: only one participant in group
         if len(group) == 1:
-            selected = [2] if has_view and above_threshold else [0]
+            group.loc[
+                :, "selected"
+            ] = SelectionReason.SELECTED_AS_COMPANY_REPRESENTATIVE_NO_OTHERS_FOUND
+
+        # CASE B: multiple potential representatives
         else:
-            ranked['fill_rank'] = pd.Series(
-                range(1, len(ranked) + 1), index=ranked.index)
-            max_fill = max(ranked['fill'])
-            ranked['dfill'] = ranked['fill'].apply(lambda x: max_fill - x)
+            # find best candidate = first cand. with max fill and standardization position
+            candidates = (
+                group[(fill == max_fill) & group.std_position].index
+                if group[fill == max_fill].std_position.any()
+                else group[fill == max_fill].index
+            )
 
-            # iterate through ranks
-            for i, r in ranked.iterrows():
+            # the representative
+            group.loc[
+                group.index == candidates[0],
+                "selected"
+            ] = SelectionReason.SELECTED_AS_COMPANY_REPRESENTATIVE
 
-                if sum(selected) == 0 and r['std_position'] and r['dfill'] <= 0.1:
-                    selected.append(1)
-                else:
-                    selected.append(0)
+            # the rest is not selected
+            group.loc[
+                pd.isnull(group.selected),
+                "selected"
+            ] = SelectionReason.NOT_SELECTED_OTHER_REPRESENTATIVE_WAS_SELECTED
 
-        if sum(selected) == 0 and has_view and above_threshold:
-            selected[0] = 1
+        return group.selected
 
-        return pd.Series(selected, index=ranked.index)
-
-    @staticmethod
-    def select(panel):
+    def _select(self, df):
         """
         Select one participant from all participant groups in the data.
         Calls DataSetCreator._select on each group. Appends selection reasons.
 
-        :param panel: Pandas DataFrame
+        :param df: Pandas DataFrame
         :return:
         """
 
-        criteria = None
+        participants = None
         try:
-            criteria = pd.DataFrame.from_dict({
-                'panel_entity_id': panel['panel_entity_id'],
-                'person_id': panel['person_id'],
-                'year': panel['year'],
-                'fill': panel['total_fill'],
-                'std_position': panel['cat_position'].str.contains('standard', case=False),
-                'num_empl': panel['num_empl'],
-                'num_turnover': panel['num_turnover'],
-                'view': panel['view']
-            })
-            # debug
-            # logger.info("positions: ")
-            # logger.info(panel['cat_position'].value_counts())
-        except Exception as e:
-            logger.error("Data is missing for {}:".format(panel['year'].unique()[0]))
-            logger.error(e)
+            participants = df[["panel_entity_id", "person_id", "year", "total_fill", "cat_position", "view"]].copy()
+        except Exception as ex:
+            logger.error("Data is missing for {}:".format(df['year'].unique()[0]))
+            logger.error(ex)
             logger.info("Make sure that the following variables exist and have completely mapped scales:")
             logger.info("email, cat_position, num_empl, num_turnover, view")
             exit(0)
 
+        participants["selected"] = np.nan
+        participants.loc[
+            participants.total_fill < self.settings["min_fill"],
+            "selected"
+        ] = SelectionReason.NOT_ENOUGH_QUESTIONS_ANSWERED
+
+        participants["std_position"] = participants['cat_position'].str.contains('standard', case=False)
+
         selection = []
-        for name, group in criteria.groupby(['panel_entity_id', 'year']):
-            group_selection = DataSetCreator._select(group)
-            selection.append(group_selection)
+        if self.settings["include_privates_in_representative_selection"]:
+            # group all participants that answered enough questions
+            # by their panel_entity_id and the year of participantion
+            for name, group in participants.groupby(['panel_entity_id', 'year']):
+                group_selection = self._select_company_representative(group.copy())
+                selection.append(group_selection)
+        else:
+            # select all participants with view=private & enough answered questions
+            participants.loc[
+                (participants.view == "private") &
+                (participants.total_fill >= self.settings["min_fill"]),
+                "selected"
+            ] = SelectionReason.SELECTED_AS_INDUSTRY_REPRESENTATIVE
+            selection.append(participants[participants.view == "private"].selected)
+
+            # group all view=company participants that answered enough questions
+            # by their panel_entity_id and the year of participantion
+            remaining = participants[
+                (participants.view != "private") &
+                (pd.isnull(participants.selected))
+            ].copy()
+            for name, group in remaining.groupby(['panel_entity_id', 'year']):
+                group_selection = DataSetCreator._select_company_representative(group)
+                selection.append(group_selection)
 
         selected = pd.concat(selection)
-        logger.info("{}: selected {}/{} participants".format(
-            ", ".join([str(y) for y in panel['year'].unique().tolist()]),
-            len(selected[selected>0].index), len(selected)
-        ))
 
-        return selected > 0, selected.replace({
-            0: 'other representative selected or not enough questions answered',
-            1: 'selected as representative',
-            2: 'only representative'
-        })
+        return (
+            selected > 0,
+            selected.replace({r.value: r.name.lower() for r in SelectionReason})
+        )
+
+    @staticmethod
+    def get_fill(df):
+        """
+        Get percentage of questions filled in by participants as Pandas Series.
+
+        :param df: Pandas DataFrame
+        :return: Pandas Series
+        """
+        col_delta = set(df.columns).intersection(DataSetCreator.dataset_extra_cols)
+
+        return df.count(axis=1).divide(len(df.columns) - len(col_delta))
 
     def make_dataset(self, data, selected_years):
         """
@@ -473,26 +512,7 @@ class DataSetCreator(object):
         """
 
         # keep only observations for selected years
-        df = data[data['year'].isin(selected_years)].dropna(axis=1, how='all')
-
-        # calculate fill for one or multiple years
-        df['total_fill'] = df['person_id'].map(
-            df.groupby(['person_id', 'year']).agg('count').groupby(
-                'person_id').sum().sum(axis=1).divide(len(df.columns) * len(self.years))
-        )
-
-        # create "selection" column
-        selection, selection_reason = DataSetCreator.select(df)
-        df['algorithmic_selection'] = selection
-        df['algorithmic_selection_comment'] = selection_reason
-
-        # create "historic selection" column
-        logger.info("Copying historic selection...")
-        df['historic_selection'] = self._select_by_history(df)
-
-        # create merged selection column (history if available, otherwise alg. selection)
-        # TODO: review
-        df['selected'] = df['historic_selection'].fillna(df['algorithmic_selection'])
+        df = data[data['year'].isin(selected_years)].dropna(axis=1, how='all').copy()
 
         # drop questions that are not required
         try:
@@ -506,6 +526,36 @@ class DataSetCreator(object):
             logger.error("An error occured when trying to drop irrelevant questions:")
             raise ex
             exit(0)
+
+        # calculate % of questions filled in
+        df['total_fill'] = DataSetCreator.get_fill(df)
+        logger.info("{}: {} participants dropped due to too many missings".format(
+            ", ".join([str(y) for y in selected_years]),
+            len(df.total_fill[df.total_fill < self.settings["min_fill"]].index)
+        ))
+
+        # create "selection" column
+        selection, selection_reason = self._select(df)
+        df['algorithmic_selection'] = selection
+        df['algorithmic_selection_comment'] = selection_reason
+
+        # create "historic selection" column
+        df['historic_selection'] = self._select_by_history(df)
+
+        # create merged selection column (history if available, otherwise alg. selection)
+        # TODO: review
+        # df['selected'] = df['historic_selection'].fillna(df['algorithmic_selection'])
+        df['selected'] = df['algorithmic_selection']
+
+        logger.info("{}: selected {}/{} participants".format(
+            ", ".join([str(y) for y in selected_years]),
+            len(df.selected[df.selected > 0].index),
+            len(df.selected)
+        ))
+
+        # drop email address
+        if self.settings['exclude_personal']:
+            df = df.drop(['email'], axis=1)
 
         return df
 
@@ -574,23 +624,25 @@ class DataSetCreator(object):
         available_questions_per_year = {}
 
         # iterate over columns (questions)
-        for k, d in self.data.items():
-            qs = {q_info['name_{}'.format(k)]: q_panel for q_panel, q_info in self.q_dict.items()}
+        for y, d in self.data.items():
+            qs = {q_info['name_{}'.format(y)]: q_panel for q_panel, q_info in self.q_dict.items()}
             found_qs = [k for k in qs.keys() if k in d.columns]
             not_found_qs = list(set(qs.keys()) - set(found_qs))
-            available_questions_per_year[k] = [qs[f] for f in found_qs]
+            available_questions_per_year[y] = [qs[f] for f in found_qs]
             for _ in d.iterrows():
                 row = _[1]
                 panel_data.append({
-                    **{'year': k},
+                    **{'year': y},
                     **{qs[q]: row[q] for q in found_qs},
                     **{qs[nf_q]: np.nan for nf_q in not_found_qs}
                 })
 
             # identify panel entities
             panel_df = pd.DataFrame(panel_data).replace({'nan': np.nan})
+            # t = time.process_time()
             ident = panel_df.apply(
                 lambda x: self.identify(x['email'], x['year']), axis=1).apply(pd.Series)
+            # logger.info("identifying took {} s".format(time.process_time() - t))
 
             panel_df['panel_entity_id'] = ident['panel_entity_id']
             panel_df['person_id'] = ident['person_id']
@@ -675,7 +727,6 @@ class DataSetCreator(object):
             dat.to_excel(writer, sheet_name=n)
 
         # stack all years and put them in one sheet
-        # TODO: review --> Is this the right method to have the correct selection for complete panel?
         years_dat = [d for y, d in datasets.items() if y.isdigit()]
 
         # sheet 'data'
