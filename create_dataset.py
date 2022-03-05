@@ -1,5 +1,4 @@
 import pandas as pd
-from itertools import count, combinations
 import numpy as np
 import time
 import sys
@@ -7,6 +6,8 @@ import json
 from jsmin import jsmin
 from collections import Counter
 import os.path
+from xlrd.biffh import XLRDError
+from pprint import pprint
 
 # set up logging (to console)
 import logging
@@ -93,6 +94,10 @@ def load_excel_sheet(file, sheet=None, exit_on_error=True):
             exit(0)
     except pd.errors.ParserError:
         logger.error("File '{}' is broken.".format(file))
+        if exit_on_error:
+            exit(0)
+    except XLRDError:
+        logger.error("Sheet '{}' is missing in {}.".format(sheet, file))
         if exit_on_error:
             exit(0)
     except Exception:
@@ -306,7 +311,8 @@ class DataSetCreator(object):
                     if key_name in r.keys():
                         original = r['alternative_{}'.format(n)]
                         if not pd.isnull(original):
-                            q_map[original] = r['value']
+                            # cast all values to str to avoid type mismatches
+                            q_map[str(original)] = str(r['value'])
 
         return q_map
 
@@ -431,6 +437,8 @@ class DataSetCreator(object):
                 'num_turnover': panel['num_turnover'],
                 'view': panel['view']
             })
+            # debug
+            logger.info("Group in {}: {} positions".format(panel['year'].unique()[0], len(panel['cat_position'].unique())))
         except Exception as e:
             logger.error("Data is missing for {}:".format(panel['year'].unique()[0]))
             logger.error(e)
@@ -517,12 +525,12 @@ class DataSetCreator(object):
             for q in q_dict.keys():
                 obs_map[q_dict[q]['name_{}'.format(y)]] = DataSetCreator._get_q_map(q, q_dict, scales)
 
-        for y, d in data.items():
-            for c in d.columns:
+        for y in data.keys():
+            for c in data[y].columns:
                 if c in obs_map.keys():
-                    d[c].astype(str).replace(obs_map[c], inplace=True)
+                    data[y][c] = data[y][c].astype(str).replace(obs_map[c])
                     if c in q_dict.keys() and q_dict[c]['format'] == 'numeric':
-                        d[c] = pd.to_numeric(d[c], errors='coerce')
+                        data[y][c] = pd.to_numeric(data[y][c], errors='coerce')
 
         return data
 
